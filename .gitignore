@@ -1,0 +1,21 @@
+# the unpacked features file is too large for GitHub (rebuild it with data/unpack_data.py)
+data/elliptic_bitcoin_dataset/elliptic_txs_features.csv
+data/elliptic_bitcoin_dataset/elliptic_txs_features.csv.gz
+data/pyg_elliptic/
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# LaTeX build files
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# macOS
+.DS_Store

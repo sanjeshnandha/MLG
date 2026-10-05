@@ -1,0 +1,12 @@
+features,model,precision,recall,f1,f1_std,ap
+AF,Random Forest,0.923,0.722,0.81,0.004,0.783
+AF,Skip-GCN,0.756,0.466,0.575,0.024,0.597
+AF,GCN,0.786,0.439,0.56,0.034,0.604
+AF,MLP,0.556,0.539,0.546,0.009,0.443
+AF,Logistic Regression,0.311,0.68,0.427,0.0,0.322
+AF + emb,RF + GCN embedding,0.924,0.719,0.809,0.01,0.777
+LF,Random Forest,0.848,0.705,0.77,0.004,0.77
+LF,MLP,0.447,0.745,0.559,0.017,0.519
+LF,Logistic Regression,0.393,0.714,0.507,0.0,0.299
+LF,GCN,0.428,0.599,0.495,0.018,0.526
+LF,Skip-GCN,0.386,0.619,0.475,0.014,0.493

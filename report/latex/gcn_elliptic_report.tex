@@ -1,0 +1,492 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{mathpazo}
+\renewcommand{\ttdefault}{txtt}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue!50!black]{hyperref}
+
+\definecolor{licit}{HTML}{2a78d6}
+\definecolor{illicit}{HTML}{eb6834}
+\definecolor{codebg}{HTML}{f5f5f4}
+\definecolor{notebg}{HTML}{eef4fc}
+\lstset{basicstyle=\ttfamily\footnotesize,backgroundcolor=\color{codebg},frame=single,rulecolor=\color{black!25},
+  columns=fullflexible,keepspaces=true,showstringspaces=false,commentstyle=\itshape\color{black!55},
+  keywordstyle=\bfseries,language=Python,aboveskip=6pt,belowskip=6pt}
+\setlist{itemsep=3pt,topsep=4pt}
+\setlength{\parskip}{4pt}
+\pagestyle{fancy}\fancyhf{}
+\fancyhead[R]{\small Catching Bitcoin Fraud with a Graph Convolutional Network}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\newcommand{\Ahat}{\hat{A}}
+% a simple shaded box for "in plain words" notes
+\newcommand{\plain}[1]{\par\noindent\colorbox{notebg}{\parbox{\dimexpr\linewidth-2\fboxsep}{\small\textbf{In plain words:} #1}}\par}
+
+\title{\vspace{-1.2cm}\textbf{Catching Bitcoin Fraud with a\\ Graph Convolutional Network}\\[4pt]
+\large Using a GCN on the Elliptic dataset to spot illicit transactions}
+\author{\textbf{[Your name]} \\ \textcolor{red}{[roll no.]}}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\section*{Summary}
+Criminals use Bitcoin to move money from scams, ransomware and illegal online markets. Every Bitcoin transaction is public,
+so in principle we can follow the money, but there are far too many transactions to check by hand. In this project we
+train a \textbf{Graph Convolutional Network (GCN)} to look at a transaction \emph{and the transactions connected to it} and decide
+whether it is \textbf{licit} (normal) or \textbf{illicit} (linked to crime).
+
+We use the real \textbf{Elliptic dataset} of about 200,000 Bitcoin transactions. We wrote the GCN ourselves in PyTorch instead of
+using a ready-made library layer, and we compared it with simpler models.
+
+\begin{itemize}
+  \item Our GCN catches a little under half of the criminal transactions in the test period, and when it raises an alarm it is
+        right about 8 times out of 10.
+  \item Using the connections between transactions makes the model's alarms much more trustworthy than the same model without
+        them.
+  \item A simple \textbf{Random Forest} model still did best overall, which matches what the creators of the dataset found.
+  \item After a large illegal market was shut down, \textbf{every} model stopped working, because criminals changed their behaviour.
+\end{itemize}
+
+%=====================================================================
+\section{The Problem}
+%=====================================================================
+Imagine you work at a bank or a crypto exchange. Thousands of Bitcoin transactions pass through every day, and a few of
+them carry money from crime. You need to flag those few for an investigator to look at, without drowning the investigator
+in false alarms.
+
+The key idea of this project is simple: \textbf{a transaction is known by the company it keeps.} Money does not appear out of
+nowhere. It comes from earlier transactions and flows into later ones:
+\begin{center}
+\begin{tikzpicture}[node distance=1.1cm, every node/.style={font=\small}, >={Stealth[length=2mm]}]
+  \node[draw, rounded corners, fill=black!5] (w) {Wallet A};
+  \node[draw, rounded corners, fill=black!5, right=of w] (b) {Transaction B};
+  \node[draw, rounded corners, fill=black!5, right=of b] (c) {Transaction C};
+  \node[draw, rounded corners, fill=black!5, right=of c] (d) {Transaction D};
+  \draw[->] (w) -- (b); \draw[->] (b) -- (c); \draw[->] (c) -- (d);
+\end{tikzpicture}
+\end{center}
+If B receives money from known criminal transactions, B is suspicious too, even if B looks normal on its own. A normal
+machine-learning model looks at each transaction alone. A GCN also looks at its neighbours. Our plan was:
+\begin{center}
+\small
+\textbf{Problem:} spot suspicious transactions $\;\rightarrow\;$
+\textbf{Graph:} transactions and the money flowing between them $\;\rightarrow\;$
+\textbf{GCN:} learns from each transaction and its neighbours $\;\rightarrow\;$
+\textbf{Output:} licit or illicit
+\end{center}
+
+%=====================================================================
+\section{The Dataset}
+%=====================================================================
+The \textbf{Elliptic dataset} \cite{weber} was released by Elliptic, a company that tracks crypto crime, together with
+researchers from MIT and IBM. It is the largest public dataset of labelled Bitcoin transactions. We treat it as a graph:
+
+\begin{itemize}
+  \item \textbf{Nodes (dots):} 203,769 Bitcoin transactions.
+  \item \textbf{Edges (lines):} 234,355 money flows. An edge from A to B means money that came out of A was spent in B.
+  \item \textbf{Features:} each transaction has 165 numbers describing it, such as how many inputs and outputs it has, the fee,
+        and the amount. 93 of these describe the transaction itself, and the other 72 summarise its direct neighbours.
+        The names of the features are hidden for privacy.
+  \item \textbf{Time:} every transaction belongs to one of 49 time steps, each about two weeks apart.
+  \item \textbf{Labels:} 4,545 are marked \textcolor{illicit}{\textbf{illicit}}, 42,019 are marked \textcolor{licit}{\textbf{licit}},
+        and 157,205 (77\%) are \textbf{unknown}. Nobody has checked those.
+\end{itemize}
+
+Figure~\ref{fig:ego} shows a real piece of the graph. About twenty illicit transactions all send money into one
+transaction. This ``many-into-one'' shape is a common way to collect criminal money. You can only see it by looking at
+the connections.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.58\linewidth]{figures/ego_graph.png}
+  \caption{A real neighbourhood from the dataset. The big orange dot is an illicit transaction. Arrows show which way the money moved.}
+  \label{fig:ego}
+\end{figure}
+
+\subsection*{Three things that make this dataset tricky}
+\begin{enumerate}
+  \item \textbf{Very few criminals.} Only about 1 in 10 labelled transactions is illicit. A lazy model that says ``everything is
+        fine'' would be 93.5\% accurate on our test data while catching zero criminals. So \textbf{accuracy is a misleading score
+        here}, and we use better ones (Section~\ref{sec:scores}).
+  \item \textbf{Time matters.} We must predict the \emph{future}, not the past. So we train on time steps 1--34 and test on
+        time steps 35--49, as the dataset's authors did. Transactions from different time steps are never connected, so the
+        test transactions are in completely new graphs that the model has never seen.
+  \item \textbf{Neighbours really do look alike.} When we checked, a neighbour of an illicit transaction was illicit 54\% of the
+        time, compared with only 10\% for a random labelled transaction. This tells us the connections carry useful
+        information, which is exactly what a GCN needs.
+\end{enumerate}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/dataset_timesteps.png}
+  \caption{Left: labelled transactions in each time step. Right: the share that is illicit. The dashed line separates
+  training (left) from testing (right).}
+  \label{fig:timesteps}
+\end{figure}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{ll}
+\toprule
+Transactions (nodes) & 203,769 \\
+Money flows (edges) & 234,355 \\
+Features per transaction & 165 \\
+Illicit / licit / unknown & 4,545 / 42,019 / 157,205 \\
+Training data (time steps 1--34) & 29,894 labelled, 3,462 of them illicit \\
+Test data (time steps 35--49) & 16,670 labelled, 1,083 of them illicit \\
+Average number of neighbours & 2.3 \\
+\bottomrule
+\end{tabular}
+\caption{The dataset in numbers.}
+\label{tab:data}
+\end{table}
+
+%=====================================================================
+\section{What Is a GCN?}
+%=====================================================================
+\subsection{The idea}
+A normal neural network takes a list of numbers, such as one transaction's features, and gives an answer. It cannot use
+the fact that transactions are connected.
+
+A \textbf{Graph Convolutional Network} adds one simple step: \textbf{before deciding, every node looks at its neighbours and
+mixes their information with its own.} One round of mixing lets a node learn from its direct neighbours. Two rounds let it
+learn from its neighbours' neighbours, two steps away. We use two rounds, called two \emph{layers}.
+
+\plain{A GCN is like judging a person by their own behaviour \emph{and} by the people they spend time with. One layer looks at
+friends; two layers also look at friends of friends.}
+
+\subsection{Why use a GCN for this problem?}
+\begin{itemize}
+  \item \textbf{Fraud leaves a trail.} Criminal money is split, merged and passed along. Where the money came from and where it goes
+        matters as much as the transaction itself.
+  \item \textbf{Most transactions have no label.} Unlabelled transactions still pass information to their neighbours, so the
+        model can use all 200,000 transactions, not just the labelled ones.
+  \item \textbf{It is fast.} The model only does work along existing connections, so it handles 200,000 transactions in under a
+        second on a normal laptop.
+\end{itemize}
+
+\subsection{The formula, explained step by step}
+We describe the whole graph with an \textbf{adjacency matrix} $A$, a big table where $A_{ij}=1$ if transactions $i$ and $j$
+are connected and 0 otherwise. The features of all transactions form a table $X$ with one row per transaction.
+
+\textbf{Step 1: Add self-loops.} We connect every transaction to itself, $\tilde A = A + I$, so that when a node mixes in
+its neighbours' information, it also keeps its own.
+
+\textbf{Step 2: Make it fair.} Some transactions have hundreds of neighbours and most have only two. If we simply added up
+neighbour information, busy nodes would get huge numbers. So we scale each connection by the number of neighbours on both
+sides:
+\[
+  \Ahat = \tilde D^{-1/2}\,\tilde A\,\tilde D^{-1/2}
+\]
+which means that for two connected transactions $i$ and $j$,
+\[
+  \Ahat_{ij} = \frac{1}{\sqrt{(\text{neighbours of } i + 1)\times(\text{neighbours of } j + 1)}}.
+\]
+Here $\tilde D$ is a table that just stores how many connections each node has.
+
+\textbf{Step 3: One GCN layer.} A layer does two things:
+\[
+  H_{\text{new}} = \mathrm{ReLU}\big(\,\Ahat \;\cdot\; H \;\cdot\; W\,\big)
+\]
+\begin{itemize}
+  \item $H \cdot W$: transform each transaction's features using learned weights $W$. This is the part the model learns.
+  \item $\Ahat \cdot (\dots)$: replace each transaction by a weighted average of itself and its neighbours. This is the
+        ``look at the neighbours'' part.
+  \item ReLU: a simple function that sets negative numbers to zero, which lets the network learn non-linear patterns.
+\end{itemize}
+
+\textbf{Step 4: Stack two layers and give an answer.}
+\[
+  \text{Output} = \mathrm{softmax}\Big(\Ahat \cdot \mathrm{ReLU}\big(\Ahat \cdot X \cdot W_1\big) \cdot W_2\Big)
+\]
+The softmax turns the final two numbers into two probabilities: ``licit'' and ``illicit''. If the illicit probability is at
+least 50\%, we flag the transaction.
+
+\plain{Each layer is ``average with your neighbours, then transform''. The only things the computer learns are the two
+weight tables $W_1$ and $W_2$. The graph part, $\Ahat$, is fixed and calculated once from the connections.}
+
+\subsection{Where does the formula come from? (short version)}
+GCNs come from \emph{graph signal processing}. Just as a sound can be split into low and high frequencies, values on a graph
+can be split into ``smooth'' patterns, where neighbours have similar values, and ``noisy'' patterns, where neighbours differ.
+The exact version of this needs very heavy maths that is far too slow for 200,000 nodes. Kipf and Welling \cite{kipf} showed
+that if you keep only the simplest possible approximation and add the self-loop trick from Step~1, you get exactly the
+``average with your neighbours'' rule above. In other words, a GCN layer is a filter that keeps the smooth patterns and
+removes some of the noise.
+
+%=====================================================================
+\section{How We Built It}
+%=====================================================================
+\subsection{Training the model}
+\begin{enumerate}
+  \item \textbf{Prepare the data.} Load the three files (features, labels, connections), scale every feature to a similar range,
+        and build $\Ahat$ from the list of connections.
+  \item \textbf{Make a guess.} Run all 203,769 transactions through the GCN to get an ``illicit'' probability for each one.
+  \item \textbf{Measure the mistakes.} Compare the guesses with the true labels, but only for the 29,894 labelled training
+        transactions.
+  \item \textbf{Improve.} Adjust the weights slightly to reduce the mistakes, using the Adam optimiser.
+  \item \textbf{Repeat} steps 2--4 for 200 rounds (epochs).
+  \item \textbf{Test} once on time steps 35--49, which the model never saw during training.
+\end{enumerate}
+
+\textbf{Dealing with so few criminals.} Because only about 1 in 10 examples is illicit, the model could get a low error by
+ignoring them. To stop this, we count a mistake on an illicit transaction as more serious than a mistake on a licit one
+(weights 0.7 and 0.3, as in \cite{weber}). This is called a \emph{weighted loss}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw=black!60, rounded corners=2pt, align=center, font=\scriptsize, minimum height=1.15cm, text width=2.2cm, fill=#1},
+  box/.default=black!4, >={Stealth[length=2mm]}]
+\node[box] (x) {Transaction features\\(165 per transaction)};
+\node[box=licit!18, right=0.4cm of x] (l1) {\textbf{Layer 1}\\average with neighbours,\\transform to 100 numbers};
+\node[box, right=0.4cm of l1] (relu) {ReLU};
+\node[box=licit!18, right=0.4cm of relu] (l2) {\textbf{Layer 2}\\average with neighbours,\\transform to 2 numbers};
+\node[box, right=0.4cm of l2] (out) {Softmax\\$\rightarrow$ licit / illicit};
+\foreach \a/\b in {x/l1, l1/relu, relu/l2, l2/out} \draw[->] (\a) -- (\b);
+\end{tikzpicture}
+\caption{How data moves through our two-layer GCN.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{The code}
+We wrote the GCN ourselves in PyTorch, so every line matches the formula. Building $\Ahat$:
+\begin{lstlisting}
+def build_norm_adj(src, dst, n):
+    loops = torch.arange(n)
+    row = torch.cat([src, dst, loops])     # connections in both directions + self-loops
+    col = torch.cat([dst, src, loops])
+    key = torch.unique(row * n + col)      # remove duplicates
+    row, col = key // n, key % n
+    d = torch.zeros(n).scatter_add_(0, row, torch.ones(row.numel()))   # count neighbours
+    w = d[row].pow(-0.5) * d[col].pow(-0.5)                             # fair scaling
+    return torch.sparse_coo_tensor(torch.stack([row, col]), w, (n, n)).coalesce()
+\end{lstlisting}
+One GCN layer is a single line, ``average the transformed features over the neighbours''. This is slightly simplified from the notebook, which also reuses a pre-computed $\Ahat X$ to save time:
+\begin{lstlisting}
+class GCNLayer(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.W = nn.Parameter(torch.empty(in_dim, out_dim))
+        self.b = nn.Parameter(torch.zeros(out_dim))
+        nn.init.xavier_uniform_(self.W)
+    def forward(self, A, H):
+        return torch.sparse.mm(A, H @ self.W) + self.b      # A_hat (H W) + b
+\end{lstlisting}
+
+\textbf{A note on size.} Storing $\Ahat$ as a full table would need $203{,}769 \times 203{,}769$ numbers, about 166\,GB of
+memory. But almost all of those numbers are zero, because each transaction has only a couple of neighbours. So we store
+only the 672,479 non-zero entries as a \emph{sparse} matrix, which fits easily in memory. The whole model has just
+16,802 numbers to learn.
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{ll}
+\toprule
+Size of the hidden layer & 100 \\
+Optimiser & Adam, learning rate 0.01 \\
+Training rounds & 200 \\
+Loss & weighted, 0.7 for illicit and 0.3 for licit \\
+Flag a transaction if & illicit probability $\ge$ 50\% \\
+Repeated with & 5 different random starting points (seeds) \\
+\bottomrule
+\end{tabular}
+\caption{Settings. We chose these in advance and did not tune them on the test data.}
+\end{table}
+
+\subsection{What we compared against}
+To check whether the graph really helps, we also trained:
+\begin{itemize}
+  \item \textbf{MLP:} exactly the same network but \emph{without} the neighbour step ($\Ahat$ replaced by ``do nothing'').
+        This is the fairest comparison, because the only difference is the graph.
+  \item \textbf{Skip-GCN:} a GCN with an extra shortcut, so that each transaction's own features also go straight to the
+        output and are not diluted by its neighbours.
+  \item \textbf{Logistic Regression} and \textbf{Random Forest:} two classic models that look at each transaction alone.
+\end{itemize}
+We ran every model twice: once with all 165 features, and once with only the 93 features that describe the transaction itself.
+
+\subsection{How we score the models}
+\label{sec:scores}
+Since accuracy is misleading here, we use the scores a fraud team would actually care about:
+\begin{itemize}
+  \item \textbf{Precision:} of the transactions we flagged, how many were really illicit? Low precision means wasting
+        investigators' time on false alarms.
+  \item \textbf{Recall:} of all the illicit transactions, how many did we catch? Low recall means criminals slipping through.
+  \item \textbf{F1 score:} one number that balances precision and recall. It is high only if both are high. This is our main score.
+  \item \textbf{Ranking score (AP):} if we sort all transactions from ``most suspicious'' to ``least suspicious'', how well are the
+        illicit ones pushed to the top? This does not depend on the 50\% cut-off.
+\end{itemize}
+
+%=====================================================================
+\section{Results}
+%=====================================================================
+\subsection{Training}
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/training_curves.png}
+  \caption{Left: the error goes down as the model learns. Right: F1 score on the training data (blue) and on the unseen
+  test data (orange).}
+  \label{fig:curves}
+\end{figure}
+
+The error drops quickly in the first 20 rounds and then keeps falling slowly (Figure~\ref{fig:curves}). The F1 score on the
+training data reaches 0.91, while on the unseen test data it climbs to 0.57. The gap is normal: the future is always harder to
+predict than the past.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.36\linewidth]{figures/confusion_gcn.png}
+  \caption{What the GCN got right and wrong on the 16,670 test transactions.}
+  \label{fig:cm}
+\end{figure}
+Figure~\ref{fig:cm} shows the GCN's decisions on the test data. It flagged 689 transactions, and 507 of them really were
+illicit, so \textbf{74\% of its alarms were correct}. It caught 507 of the 1,083 illicit transactions (47\%) and missed the rest.
+
+\subsection{Comparing all the models}
+\begin{table}[H]
+\centering\small
+\begin{tabular}{llcccc}
+\toprule
+Features used & Model & Precision & Recall & \textbf{F1 score} & Ranking (AP) \\
+\midrule
+All 165 & Logistic Regression & 0.31 & 0.68 & 0.43 & 0.32 \\
+        & MLP (no graph)      & 0.56 & 0.54 & 0.55 & 0.44 \\
+        & \textbf{GCN (ours)} & \textbf{0.79} & 0.44 & 0.56 & \textbf{0.60} \\
+        & Skip-GCN            & 0.76 & 0.47 & 0.58 & 0.60 \\
+        & Random Forest       & 0.92 & 0.72 & \textbf{0.81} & 0.78 \\
+\midrule
+Own 93 only & Logistic Regression & 0.39 & 0.71 & 0.51 & 0.30 \\
+        & MLP (no graph)      & 0.45 & 0.75 & 0.56 & 0.52 \\
+        & \textbf{GCN (ours)} & 0.43 & 0.60 & 0.50 & 0.53 \\
+        & Skip-GCN            & 0.39 & 0.62 & 0.48 & 0.49 \\
+        & Random Forest       & 0.85 & 0.71 & \textbf{0.77} & 0.77 \\
+\bottomrule
+\end{tabular}
+\caption{Test results, averaged over 5 runs (higher is better for every column).}
+\label{tab:final}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/model_comparison.png}
+  \caption{F1 score of each model. Light bars use only a transaction's own 93 features; dark bars use all 165.}
+  \label{fig:comparison}
+\end{figure}
+
+\subsection{Results over time}
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\linewidth]{figures/f1_per_timestep.png}
+  \caption{F1 score of each model in each test time step (top), and how many illicit transactions each time step had (bottom).}
+  \label{fig:perstep}
+\end{figure}
+
+\subsection{Does adding more layers help?}
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\linewidth]{figures/depth.png}
+  \caption{Left: F1 score as we add more GCN layers. Right: how similar the transactions look to each other inside the model
+  (1 = all identical).}
+  \label{fig:depth}
+\end{figure}
+
+%=====================================================================
+\section{What We Learned}
+%=====================================================================
+\subsection{The graph makes alarms more trustworthy}
+The fairest test of the graph is GCN versus MLP, because they are the same network and the only difference is whether it
+looks at neighbours. With all features:
+\begin{itemize}
+  \item \textbf{Precision rose from 56\% to 79\%}, so far fewer false alarms.
+  \item The \textbf{ranking score rose from 0.44 to 0.60}, so illicit transactions are pushed much closer to the top of the list.
+  \item But \textbf{recall dropped} from 54\% to 44\%, so the F1 score only improved a little (0.55 to 0.56).
+\end{itemize}
+In other words, looking at neighbours made the model more careful and more accurate when it raised an alarm, but also a bit more
+hesitant to raise one. In practice, a bank could lower the 50\% cut-off to catch more criminals while keeping fairly good precision.
+
+\subsection{But the graph is not magic}
+When we gave the models only each transaction's own 93 features, the GCN did \emph{not} beat the MLP on F1 (0.50 versus 0.56).
+The original researchers saw the same thing \cite{weber}. We think there are three reasons:
+\begin{itemize}
+  \item \textbf{Too much averaging.} Most transactions have only about two neighbours, so when a node averages with them,
+        half or more of its own information is replaced by theirs. Since 77\% of transactions are unlabelled, much of what gets
+        mixed in carries no clear signal.
+  \item \textbf{Criminal transactions often touch normal ones.} Only about half of an illicit transaction's labelled neighbours
+        are illicit, so averaging can water down exactly the rare signal we want to find.
+  \item \textbf{The future looks different.} The test graphs are new, and the connection patterns learned from the past
+        carry over less well than simple per-transaction facts.
+\end{itemize}
+
+\subsection{The simple model won}
+The Random Forest scored best (F1 0.81), just as in the original study. Random Forests are very good at tables of mixed
+numbers such as amounts, fees and counts, and they can learn sharp rules like ``fee above X and more than Y outputs''. This is a
+useful reminder that a fancier model is not always better. The best choice depends on the data.
+
+\subsection{Every model failed when criminals changed their behaviour}
+Figure~\ref{fig:perstep} may be the most important result. Up to time step 42, all models work reasonably well. At time step 43
+a big illegal online market was shut down, and from that point \textbf{every model's F1 score falls to almost zero}. (The jump at
+time step 46 is just luck: that time step had only 2 illicit transactions.)
+
+Criminals simply started doing things differently, and models trained on old patterns could not recognise the new ones. This is
+called \textbf{concept drift}. It means a real fraud-detection system must be retrained regularly with fresh data. No model
+choice can fix this on its own.
+
+\subsection{Two layers is the sweet spot}
+Figure~\ref{fig:depth} shows what happens with more layers. One layer is too simple (F1 0.27), two layers work best (0.50), and
+after that the score keeps falling (0.42, 0.39, 0.34). At the same time, the transactions start to look more and more alike
+inside the model: their similarity rises from 0.41 to 0.90.
+
+This is called \textbf{over-smoothing} \cite{li}. Every layer averages each node with its neighbours. Do this many times and everything
+in the same area is averaged into the same grey mush, so illicit and licit transactions can no longer be told apart. That is
+why GCNs are usually kept to two or three layers.
+
+\plain{Averaging with your friends once gives you useful context. Averaging with friends of friends of friends of friends
+makes everyone in town look the same.}
+
+%=====================================================================
+\section{Limitations}
+%=====================================================================
+\begin{itemize}
+  \item \textbf{We did not tune the settings.} We used standard values to keep the test fair. With tuning, the GCN would probably
+        score higher; the original paper reached 0.63 with longer training.
+  \item \textbf{Only 5 runs.} Small differences of about 0.02 in F1 between the neural models could be down to chance.
+  \item \textbf{We ignored the direction of money flow.} We treated ``A pays B'' the same as ``B pays A''. Keeping direction could
+        help.
+  \item \textbf{All neighbours count the same.} A smarter model, such as a Graph Attention Network, could learn which neighbours
+        matter more.
+  \item \textbf{The model does not update itself over time,} so it cannot cope with changes in criminal behaviour (concept drift).
+\end{itemize}
+
+%=====================================================================
+\section{Conclusion}
+%=====================================================================
+We built a Graph Convolutional Network from scratch and used it on a real problem: finding criminal Bitcoin transactions among
+more than 200,000. The GCN uses a simple idea, that a transaction should be judged together with the transactions it is
+connected to.
+
+Looking at neighbours made the model's alarms much more reliable (precision 79\% versus 56\% without the graph), and we saw
+first-hand why GCNs are kept shallow. We also found the limits of the approach. A well-tuned Random Forest still won, and
+every model broke down when criminals changed their behaviour after a market shutdown. The main lesson is that graphs are a
+powerful extra source of information for fraud detection, but in the real world keeping the model up to date matters as much
+as choosing it.
+
+\begin{thebibliography}{9}\small
+\bibitem{kipf} T.~N.~Kipf and M.~Welling. Semi-Supervised Classification with Graph Convolutional Networks. \emph{ICLR}, 2017.
+\bibitem{weber} M.~Weber, G.~Domeniconi, J.~Chen, D.~K.~I.~Weidele, C.~Bellei, T.~Robinson and C.~E.~Leiserson. Anti-Money Laundering in
+Bitcoin: Experimenting with Graph Convolutional Networks for Financial Forensics. \emph{KDD Workshop on Anomaly Detection in Finance}, 2019.
+\bibitem{li} Q.~Li, Z.~Han and X.-M.~Wu. Deeper Insights into Graph Convolutional Networks for Semi-Supervised Learning. \emph{AAAI}, 2018.
+\end{thebibliography}
+\end{document}
