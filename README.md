@@ -45,9 +45,13 @@ data/
     elliptic_txs_edgelist.csv   Money flows between transactions
     elliptic_txs_features.csv.gz.part00-03   Features, compressed and split (GitHub's 100 MB limit)
 results/
-  figures/                      All plots from the notebook
+  figures/                      All plots from the notebook (+ oversmoothing_untrained.png)
   final_results.csv             Summary table
   all_runs.csv                  Every model, every seed
+  oversmoothing_untrained.csv   Similarity after k averaging steps, no training
+analysis/
+  implementation_check.py       Checks the GCN code against the formula and the hand calculation
+  oversmoothing_untrained.py    Over-smoothing without training + lambda_2 of A_hat
 report/
   gcn_elliptic_report.pdf             Report (simple, easy-to-read version)
   gcn_elliptic_report_detailed.pdf    Report (detailed, more technical version)

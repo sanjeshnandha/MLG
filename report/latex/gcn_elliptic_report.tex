@@ -220,13 +220,49 @@ least 50\%, we flag the transaction.
 \plain{Each layer is ``average with your neighbours, then transform''. The only things the computer learns are the two
 weight tables $W_1$ and $W_2$. The graph part, $\Ahat$, is fixed and calculated once from the connections.}
 
-\subsection{Where does the formula come from? (short version)}
-GCNs come from \emph{graph signal processing}. Just as a sound can be split into low and high frequencies, values on a graph
-can be split into ``smooth'' patterns, where neighbours have similar values, and ``noisy'' patterns, where neighbours differ.
-The exact version of this needs very heavy maths that is far too slow for 200,000 nodes. Kipf and Welling \cite{kipf} showed
-that if you keep only the simplest possible approximation and add the self-loop trick from Step~1, you get exactly the
-``average with your neighbours'' rule above. In other words, a GCN layer is a filter that keeps the smooth patterns and
-removes some of the noise.
+\subsection{Where does the formula come from?}
+The GCN rule is not made up. It comes from \emph{graph signal processing}: just as a sound can be split into low and high
+frequencies, values on a graph can be split into ``smooth'' patterns, where neighbours have similar values, and ``noisy''
+patterns, where neighbours differ. Kipf and Welling \cite{kipf} reached the rule in five steps.
+
+\textbf{Step 1: Measure how ``bumpy'' a signal is.} With degree matrix $D$, the normalised \emph{graph Laplacian} is
+\[
+  L = I - D^{-1/2} A D^{-1/2}, \qquad
+  f^{T} L f = \tfrac12 \sum_{i,j} A_{ij}\Big(\tfrac{f_i}{\sqrt{d_i}} - \tfrac{f_j}{\sqrt{d_j}}\Big)^2 .
+\]
+For a value $f_i$ on every node (say, a transaction's fee), $f^T L f$ is small when connected nodes have similar values and
+large when they differ.
+
+\textbf{Step 2: Split the signal into frequencies.} $L$ is symmetric, so $L = U\Lambda U^{T}$. The eigenvectors in $U$ act like
+frequencies: small eigenvalues are smooth patterns, large ones are bumpy. A \emph{graph filter} keeps some frequencies and
+removes others:
+\[
+  g_\theta \star f = U\, g_\theta(\Lambda)\, U^{T} f .
+\]
+The problem: finding $U$ takes about $N^3$ operations. For $N = 203{,}769$ that is around $8\times10^{15}$, far too slow.
+
+\textbf{Step 3: Approximate the filter with a polynomial.} Replace $g_\theta(\Lambda)$ by a polynomial in $L$:
+$g_\theta \star f \approx \sum_{k=0}^{K} \theta_k L^k f$. No eigenvectors are needed, and because $(L^k)_{ij} = 0$ when $i$ and $j$
+are more than $k$ steps apart, the filter only looks at nearby nodes.
+
+\textbf{Step 4: Keep only the first step.} Use $K = 1$, approximate the largest eigenvalue by 2, and use a single
+parameter $\theta$:
+\[
+  g_\theta \star f \approx \theta\,\big(I + D^{-1/2} A D^{-1/2}\big) f .
+\]
+This already means ``a node plus its neighbours''.
+
+\textbf{Step 5: The renormalisation trick.} $I + D^{-1/2}AD^{-1/2}$ has eigenvalues between 0 and 2, so applying it again and
+again makes numbers blow up or die out. Adding the self-loops \emph{before} normalising fixes this:
+\[
+  I + D^{-1/2}AD^{-1/2} \;\longrightarrow\; \Ahat = \tilde D^{-1/2}(A + I)\tilde D^{-1/2},
+\]
+whose eigenvalues lie in $(-1, 1]$. Finally the single number $\theta$ becomes a weight matrix $W$, and a non-linearity is
+added, which gives exactly our layer $H_{\text{new}} = \mathrm{ReLU}(\Ahat H W)$.
+
+\plain{A GCN layer is a cheap ``smoothing filter'' for graphs. It keeps the patterns that neighbours share and dampens the
+differences between them. That is why it helps when neighbours tend to have the same label, and why too many layers make
+everything look the same (Section~\ref{sec:oversmooth}).}
 
 %=====================================================================
 \section{How We Built It}
@@ -290,8 +326,9 @@ class GCNLayer(nn.Module):
 
 \textbf{A note on size.} Storing $\Ahat$ as a full table would need $203{,}769 \times 203{,}769$ numbers, about 166\,GB of
 memory. But almost all of those numbers are zero, because each transaction has only a couple of neighbours. So we store
-only the 672,479 non-zero entries as a \emph{sparse} matrix, which fits easily in memory. The whole model has just
-16,802 numbers to learn.
+only the 672,479 non-zero entries ($2 \times 234{,}355$ connections in both directions plus 203,769 self-loops) as a
+\emph{sparse} matrix, which fits easily in memory. The whole model has just \textbf{16,802} numbers to learn:
+$165\times100 + 100 = 16{,}600$ in layer 1 and $100\times2 + 2 = 202$ in layer 2.
 
 \begin{table}[H]
 \centering\small
@@ -307,6 +344,19 @@ Repeated with & 5 different random starting points (seeds) \\
 \end{tabular}
 \caption{Settings. We chose these in advance and did not tune them on the test data.}
 \end{table}
+
+\textbf{Differences from the original papers.} We follow Kipf and Welling \cite{kipf} for the optimiser (Adam, learning rate
+0.01, weight decay $5\times10^{-4}$, 200 epochs) and Weber et al.\ \cite{weber} for the problem set-up (temporal split,
+hidden size 100, weighted loss 0.3/0.7, no dropout). The differences are:
+\begin{itemize}
+  \item Kipf and Welling used 16 hidden units, dropout 0.5, weight decay on the first layer only, and stopped early based on a
+        validation set. We use 100 units (as Weber et al.), no dropout, weight decay on all weights, and no early stopping,
+        because a fair validation set would have to come from the past and would leave even fewer training time steps.
+  \item Weber et al.\ trained for 1,000 epochs with learning rate 0.001. We use the shorter Kipf--Welling schedule
+        (200 epochs, 0.01), which is faster on a laptop CPU but probably leaves our GCN slightly under-trained
+        (Section~\ref{sec:published}).
+  \item Our layers include a bias term $b$.
+\end{itemize}
 
 \subsection{What we compared against}
 To check whether the graph really helps, we also trained:
@@ -331,6 +381,24 @@ Since accuracy is misleading here, we use the scores a fraud team would actually
         illicit ones pushed to the top? This does not depend on the 50\% cut-off.
 \end{itemize}
 
+\subsection{Checking that the code is right}
+\label{sec:check}
+Before trusting any results, we checked that the code really computes the GCN formula. We ran the notebook's own
+\texttt{build\_norm\_adj} and \texttt{GCN} code on the small 5-transaction example from our maths sheet
+(script \texttt{analysis/implementation\_check.py}):
+\begin{enumerate}
+  \item \textbf{$\Ahat$ is correct.} The matrix built by the code matches the one calculated by hand (entries such as
+        $\frac12$, $\frac{1}{2\sqrt2}$, $\frac{1}{2\sqrt3}$) up to $3\times10^{-8}$, and it is symmetric.
+  \item \textbf{The model computes the formula.} With random weights, the model's output and the formula
+        $\Ahat\,\mathrm{ReLU}(\Ahat X W^{(0)} + b^{(0)})\,W^{(1)} + b^{(1)}$ written out with ordinary matrices differ by at most
+        $1.2\times10^{-7}$. This is just computer rounding, so they are the same. The faster path that re-uses a pre-computed
+        $\Ahat X$ also matches.
+  \item \textbf{It reproduces the hand calculation.} With the weights of the worked example, the model gives
+        $P(\text{illicit}) = 0.685$ for transaction 0 and $P(\text{licit}) = 0.746$ for transaction 4, exactly the numbers
+        in the maths sheet.
+\end{enumerate}
+We also checked on the real data that the starting loss is sensible (Section~\ref{sec:trainbehaviour}).
+
 %=====================================================================
 \section{Results}
 %=====================================================================
@@ -343,9 +411,27 @@ Since accuracy is misleading here, we use the scores a fraud team would actually
   \label{fig:curves}
 \end{figure}
 
-The error drops quickly in the first 20 rounds and then keeps falling slowly (Figure~\ref{fig:curves}). The F1 score on the
-training data reaches 0.91, while on the unseen test data it climbs to 0.57. The gap is normal: the future is always harder to
-predict than the past.
+\begin{table}[H]
+\centering\small
+\begin{tabular}{rccccc}
+\toprule
+Epoch & Loss & Train F1 & Test F1 & Train accuracy & Test accuracy \\
+\midrule
+1   & 1.0065 & 0.479 & 0.271 & 80.7\% & 82.2\% \\
+20  & 0.1961 & 0.766 & 0.396 & 94.1\% & 90.8\% \\
+50  & 0.1412 & 0.828 & 0.417 & 95.8\% & 92.6\% \\
+100 & 0.1107 & 0.871 & 0.500 & 96.9\% & 94.5\% \\
+150 & 0.0928 & 0.893 & 0.535 & 97.4\% & 95.2\% \\
+200 & 0.0807 & 0.908 & 0.572 & 97.8\% & 95.5\% \\
+\bottomrule
+\end{tabular}
+\caption{Selected rows of the training log (seed 42, all features; F1 is for the illicit class).}
+\label{tab:log}
+\end{table}
+
+The error drops quickly in the first 20 rounds and then keeps falling slowly (Figure~\ref{fig:curves}, Table~\ref{tab:log}).
+The F1 score on the training data reaches 0.91, while on the unseen test data it climbs to 0.57. Section~\ref{sec:general}
+discusses this gap.
 
 \begin{figure}[H]
   \centering
@@ -404,9 +490,63 @@ Own 93 only & Logistic Regression & 0.39 & 0.71 & 0.51 & 0.30 \\
   \label{fig:depth}
 \end{figure}
 
+\subsection{Over-smoothing without training}
+To see what the averaging step does on its own, we took random features $H_0$ (16 numbers per transaction) and applied
+$\Ahat$ again and again, with no weights and no ReLU: $H_k = \Ahat^k H_0$. After each step we measured how similar 1,000
+random transactions are to each other (mean cosine similarity: 0 = unrelated, 1 = identical), both across the whole graph and
+inside its largest connected piece, time step 1 with 7,880 transactions (script \texttt{analysis/oversmoothing\_untrained.py}).
+
+\begin{table}[H]
+\centering\small
+\setlength{\tabcolsep}{3.6pt}
+\begin{tabular}{lccccccccccc}
+\toprule
+Steps $k$ & 1 & 2 & 4 & 8 & 16 & 32 & 64 & 128 & 256 & 512 & 1024 \\
+\midrule
+Largest component & 0.000 & 0.000 & 0.000 & 0.003 & 0.009 & 0.030 & 0.092 & 0.256 & 0.507 & 0.710 & 0.855 \\
+All nodes         & 0.000 & $-$0.001 & $-$0.001 & $-$0.001 & 0.000 & 0.000 & 0.002 & 0.005 & 0.010 & 0.014 & 0.016 \\
+\bottomrule
+\end{tabular}
+\caption{Similarity of transactions after $k$ averaging steps, with no training.}
+\label{tab:untrained}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.78\linewidth]{figures/oversmoothing_untrained.png}
+  \caption{The same numbers as a graph. Inside one connected piece, the transactions slowly become identical.}
+  \label{fig:untrained}
+\end{figure}
+
 %=====================================================================
 \section{What We Learned}
 %=====================================================================
+\subsection{How training behaved}
+\label{sec:trainbehaviour}
+A model that has learned nothing and gives 50/50 answers would have a loss of $\ln 2 \approx 0.693$. Our first loss is 1.007,
+a little higher, because the random starting weights make some confident wrong guesses. It is in the right range, which is
+a useful sign that the loss is implemented correctly. Training then has two phases:
+\begin{itemize}
+  \item \textbf{Fast learning (epochs 1--20).} The loss falls from 1.01 to 0.20 and training F1 jumps from 0.48 to 0.77.
+  \item \textbf{Slow improvement (epochs 20--200).} The loss keeps falling slowly to 0.08, and test F1 keeps rising,
+        from 0.40 to 0.57. It is still rising at epoch 200, so longer training would probably help a little.
+\end{itemize}
+The curves are smooth, with no jitter, because we use no dropout.
+
+\subsection{The gap between training and test}
+\label{sec:general}
+Training F1 reaches 0.91 but test F1 only 0.57. The usual suspect, memorising the training data, is unlikely here: the model
+has only 16,802 weights for 29,894 labelled training transactions (about 0.6 weights per example). The main cause is
+\textbf{time}. The test transactions come from later time steps and from completely new graphs, and criminal behaviour keeps
+changing. Figure~\ref{fig:perstep} shows this directly: on the first test step (35) the GCN scores 0.86, but after the
+market shutdown at step 43 it falls to almost zero.
+
+\textbf{How reliable are the numbers?} The test period contains 16,670 labelled transactions but only 1,083 illicit ones,
+so the scores carry some noise. For recall $p = 0.468$ measured on 1,083 illicit transactions, the standard error is
+$\sqrt{p(1-p)/1083} \approx 0.015$, and for precision it is $\sqrt{0.736 \times 0.264 / 689} \approx 0.017$. Repeating the
+training with 5 different seeds gives a GCN F1 of $0.560 \pm 0.034$. Differences between models smaller than about
+0.03--0.04 should therefore not be over-interpreted.
+
 \subsection{The graph makes alarms more trustworthy}
 The fairest test of the graph is GCN versus MLP, because they are the same network and the only difference is whether it
 looks at neighbours. With all features:
@@ -436,6 +576,38 @@ The Random Forest scored best (F1 0.81), just as in the original study. Random F
 numbers such as amounts, fees and counts, and they can learn sharp rules like ``fee above X and more than Y outputs''. This is a
 useful reminder that a fancier model is not always better. The best choice depends on the data.
 
+\subsection{How do we compare with the original paper?}
+\label{sec:published}
+\begin{table}[H]
+\centering\small
+\begin{tabular}{llcc}
+\toprule
+Features & Model & Our F1 (5 seeds) & Weber et al.\ \cite{weber} \\
+\midrule
+All 165 & Logistic Regression & 0.43 & 0.48 \\
+        & MLP                 & 0.55 & 0.65 \\
+        & GCN                 & 0.56 & 0.63 \\
+        & Skip-GCN            & 0.58 & 0.71 \\
+        & Random Forest       & \textbf{0.81} & \textbf{0.79} \\
+\midrule
+Own 93 only & Logistic Regression & 0.51 & 0.46 \\
+        & MLP                 & 0.56 & 0.65 \\
+        & Random Forest       & \textbf{0.77} & \textbf{0.69} \\
+\bottomrule
+\end{tabular}
+\caption{Illicit F1 on the same temporal split: our results next to the published ones.}
+\label{tab:published}
+\end{table}
+\begin{itemize}
+  \item \textbf{The big picture is the same.} In both studies the Random Forest is clearly the best model, Skip-GCN beats the
+        plain GCN, and the plain GCN does \emph{not} beat the MLP.
+  \item \textbf{Our Random Forest is slightly better} (0.81 versus 0.79), and our Logistic Regression is close.
+  \item \textbf{Our neural models are 0.07--0.13 lower.} The most likely reason is training: Weber et al.\ trained for
+        1,000 epochs (we used 200) and may have tuned their networks, while we fixed standard settings in advance. Our test
+        F1 was still rising at epoch 200 (Table~\ref{tab:log}). Their exact code and settings were not published, so this is a
+        reference point rather than an exact replication.
+\end{itemize}
+
 \subsection{Every model failed when criminals changed their behaviour}
 Figure~\ref{fig:perstep} may be the most important result. Up to time step 42, all models work reasonably well. At time step 43
 a big illegal online market was shut down, and from that point \textbf{every model's F1 score falls to almost zero}. (The jump at
@@ -446,6 +618,7 @@ called \textbf{concept drift}. It means a real fraud-detection system must be re
 choice can fix this on its own.
 
 \subsection{Two layers is the sweet spot}
+\label{sec:oversmooth}
 Figure~\ref{fig:depth} shows what happens with more layers. One layer is too simple (F1 0.27), two layers work best (0.50), and
 after that the score keeps falling (0.42, 0.39, 0.34). At the same time, the transactions start to look more and more alike
 inside the model: their similarity rises from 0.41 to 0.90.
@@ -457,18 +630,63 @@ why GCNs are usually kept to two or three layers.
 \plain{Averaging with your friends once gives you useful context. Averaging with friends of friends of friends of friends
 makes everyone in town look the same.}
 
+\textbf{Why it happens (the maths).} $\Ahat$ is symmetric, so it can be written using its eigenvalues $\mu_i$ and
+eigenvectors $u_i$: $\Ahat = \sum_i \mu_i u_i u_i^{T}$. On a connected graph the largest eigenvalue is exactly
+$\mu_1 = 1$, with eigenvector $\pi \propto \tilde D^{1/2}\mathbf 1$ (one can check $\Ahat\pi = \pi$), and every other eigenvalue
+has $|\mu_i| < 1$. Applying $\Ahat$ $k$ times multiplies each part by $\mu_i^k$:
+\[
+  \Ahat^{k} H = \pi\pi^{T} H + \sum_{i\ge 2} \mu_i^{k}\, u_i u_i^{T} H \;\longrightarrow\; \pi\pi^{T} H
+  \qquad (k \to \infty),
+\]
+because $\mu_i^k \to 0$ for every $i \ge 2$. In the limit, every row, which means every transaction, becomes a multiple of
+the same vector $\pi^T H$, so all transactions point in the same direction \cite{li,oono}. How fast this happens depends on
+the second-largest eigenvalue $\lambda_2 = \max_{i\ge2}|\mu_i|$: the leftover differences shrink like $\lambda_2^{\,k}$.
+
+\textbf{What we observe without training} (Table~\ref{tab:untrained}, Figure~\ref{fig:untrained}):
+\begin{itemize}
+  \item Inside the largest connected piece (7,880 transactions), similarity climbs from 0.00 to 0.26 after 128 steps and
+        0.85 after 1,024 steps, heading towards 1 as the maths predicts.
+  \item It is slow because $\lambda_2 = 0.99958$ on this piece, very close to 1. Bitcoin transaction graphs are long, thin chains
+        (on average only 2.3 neighbours), so information spreads slowly.
+  \item Across the whole graph, similarity stays near 0 (0.016 after 1,024 steps). The graph is made of 49 separate pieces, one
+        per time step, and each piece smooths towards its \emph{own} direction.
+\end{itemize}
+In the \emph{trained} models (Figure~\ref{fig:depth}), similarity rose much faster, to 0.90 after only 4 layers. The learned
+weights and ReLU also squash and mix the features at every layer, so in practice a GCN can over-smooth after just a few layers
+even on a graph where pure averaging is slow. That matches the drop in F1 we measured after 2 layers.
+
 %=====================================================================
 \section{Limitations}
 %=====================================================================
+\textbf{Limitations of our experiment}
 \begin{itemize}
-  \item \textbf{We did not tune the settings.} We used standard values to keep the test fair. With tuning, the GCN would probably
-        score higher; the original paper reached 0.63 with longer training.
-  \item \textbf{Only 5 runs.} Small differences of about 0.02 in F1 between the neural models could be down to chance.
-  \item \textbf{We ignored the direction of money flow.} We treated ``A pays B'' the same as ``B pays A''. Keeping direction could
-        help.
-  \item \textbf{All neighbours count the same.} A smarter model, such as a Graph Attention Network, could learn which neighbours
-        matter more.
-  \item \textbf{The model does not update itself over time,} so it cannot cope with changes in criminal behaviour (concept drift).
+  \item \textbf{We did not tune the settings.} We used standard values to keep the test fair, and we had no validation period
+        to spare. With tuning and longer training, the GCN would probably score higher; the original paper reached 0.63.
+  \item \textbf{Only 5 runs} (2 for the depth study), and the training curves and log come from a single seed. Differences of
+        about 0.03 in F1 between the neural models could be down to chance (Section~\ref{sec:general}).
+  \item \textbf{The test curve is only plotted.} It was recorded every 10 epochs for the figures and was not used to choose
+        anything; the reported model is always the one after the last epoch.
+  \item \textbf{Few illicit examples after the shutdown.} Time steps 43--49 contain only a handful of illicit transactions
+        (2 at step 46), so per-step scores there are very noisy.
+  \item \textbf{A fixed 50\% cut-off.} It is not the best cut-off for F1 for any model; the ranking score (AP) is reported to make
+        up for this.
+  \item \textbf{The untrained over-smoothing test uses random features and cosine similarity,} which ignores the size of the
+        vectors. It shows what averaging does, not exactly what happens inside a trained model.
+\end{itemize}
+
+\textbf{Limitations of the vanilla GCN itself}, and known fixes:
+\begin{itemize}
+  \item \textbf{Over-smoothing limits depth.} Fixes: skip or residual connections (like our Skip-GCN), JK-Net, APPNP, DropEdge.
+  \item \textbf{All neighbours count the same}, weighted only by degree. Fix: Graph Attention Networks (GAT), which learn which
+        neighbours matter more.
+  \item \textbf{It ignores the direction of money flow.} We treated ``A pays B'' the same as ``B pays A''. Fix: directed graph
+        networks that treat incoming and outgoing money separately.
+  \item \textbf{It assumes neighbours are alike (homophily).} Only about half of an illicit transaction's labelled neighbours are
+        illicit, so averaging can hide the rare signal.
+  \item \textbf{It is static.} It cannot adapt when criminal behaviour changes (concept drift). Fixes: regular retraining,
+        temporal models such as EvolveGCN.
+  \item \textbf{It needs the whole graph in memory} for every training step (full-batch). Fixes: neighbour sampling
+        (GraphSAGE) or training on clusters (Cluster-GCN).
 \end{itemize}
 
 %=====================================================================
@@ -489,6 +707,7 @@ as choosing it.
 \bibitem{weber} M.~Weber, G.~Domeniconi, J.~Chen, D.~K.~I.~Weidele, C.~Bellei, T.~Robinson and C.~E.~Leiserson. Anti-Money Laundering in
 Bitcoin: Experimenting with Graph Convolutional Networks for Financial Forensics. \emph{KDD Workshop on Anomaly Detection in Finance}, 2019.
 \bibitem{li} Q.~Li, Z.~Han and X.-M.~Wu. Deeper Insights into Graph Convolutional Networks for Semi-Supervised Learning. \emph{AAAI}, 2018.
+\bibitem{oono} K.~Oono and T.~Suzuki. Graph Neural Networks Exponentially Lose Expressive Power for Node Classification. \emph{ICLR}, 2020.
 \end{thebibliography}
 
 \clearpage
