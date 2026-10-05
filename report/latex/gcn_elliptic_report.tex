@@ -23,7 +23,8 @@
 \definecolor{notebg}{HTML}{eef4fc}
 \lstset{basicstyle=\ttfamily\footnotesize,backgroundcolor=\color{codebg},frame=single,rulecolor=\color{black!25},
   columns=fullflexible,keepspaces=true,showstringspaces=false,commentstyle=\itshape\color{black!55},
-  keywordstyle=\bfseries,language=Python,aboveskip=6pt,belowskip=6pt}
+  keywordstyle=\bfseries,language=Python,aboveskip=6pt,belowskip=6pt,
+  breaklines=true,breakatwhitespace=false,postbreak=\mbox{$\hookrightarrow$\space}}
 \setlist{itemsep=3pt,topsep=4pt}
 \setlength{\parskip}{4pt}
 \pagestyle{fancy}\fancyhf{}
@@ -263,7 +264,7 @@ ignoring them. To stop this, we count a mistake on an illicit transaction as mor
 \end{figure}
 
 \subsection{The code}
-We wrote the GCN ourselves in PyTorch, so every line matches the formula. Building $\Ahat$:
+We wrote the GCN ourselves in PyTorch, so every line matches the formula. The two key pieces are shown here; the full model code is in the Appendix (Section~\ref{sec:code}). Building $\Ahat$:
 \begin{lstlisting}
 def build_norm_adj(src, dst, n):
     loops = torch.arange(n)
@@ -489,4 +490,8 @@ as choosing it.
 Bitcoin: Experimenting with Graph Convolutional Networks for Financial Forensics. \emph{KDD Workshop on Anomaly Detection in Finance}, 2019.
 \bibitem{li} Q.~Li, Z.~Han and X.-M.~Wu. Deeper Insights into Graph Convolutional Networks for Semi-Supervised Learning. \emph{AAAI}, 2018.
 \end{thebibliography}
+
+\clearpage
+\input{appendix_code}
+
 \end{document}
