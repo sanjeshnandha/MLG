@@ -53,6 +53,7 @@ report/
   gcn_elliptic_report_detailed.pdf    Report (detailed, more technical version)
   latex/                              LaTeX source of both reports + figures
 maths/
+  gcn_maths_3page.pdf           Mathematical modelling + worked example (3 pages)
   gcn_maths_4page.pdf           Mathematical modelling + worked example (4 pages)
   gcn_maths_6page.pdf           Same, with more steps (6 pages)
   gcn_maths_detailed.pdf        Full derivations incl. backpropagation and over-smoothing (11 pages)
